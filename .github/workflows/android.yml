@@ -30,14 +30,17 @@ if (!Array.isArray(data.workers) || data.workers.length === 0) {
     data.activeWorkerId = 1;
 }
 
-data.records = data.records || {};
+if (!data.records || typeof data.records !== "object") {
+    data.records = {};
+}
 
-const $ = id => document.getElementById(id);
+const $ = (id) => document.getElementById(id);
 
 function activeWorker() {
     return (
-        data.workers.find(w => w.id === data.activeWorkerId) ||
-        data.workers[0]
+        data.workers.find(
+            (w) => w.id === data.activeWorkerId
+        ) || data.workers[0]
     );
 }
 
@@ -62,7 +65,9 @@ function todayLocal() {
 
     return new Date(
         d.getTime() - offset * 60000
-    ).toISOString().slice(0, 10);
+    )
+        .toISOString()
+        .slice(0, 10);
 }
 
 function money(n) {
@@ -73,48 +78,50 @@ function fmtHours(n) {
     return (Number(n) || 0).toFixed(2);
 }
 
+
 /* =========================================================
    SETTINGS
 ========================================================= */
 
 function settings() {
     const worker = activeWorker();
-    const stored = worker.settings || {};
+    const s = worker.settings || {};
 
     return {
-        salary: Number($("salary")?.value) || 0,
+        salary: Number($("salary")?.value) || Number(s.salary) || 15000,
 
         salaryDays:
             Number($("salaryDays")?.value) ||
-            Number(stored.salaryDays) ||
+            Number(s.salaryDays) ||
             26,
 
         regularHours:
             Number($("regularHours")?.value) ||
-            Number(stored.regularHours) ||
+            Number(s.regularHours) ||
             8,
 
         otMultiplier: 2,
 
         attendanceBonus:
             Number($("attendanceBonus")?.value) ||
-            Number(stored.attendanceBonus) ||
+            Number(s.attendanceBonus) ||
             625,
 
         lateLimit:
             Number($("lateLimit")?.value) ||
-            Number(stored.lateLimit) ||
+            Number(s.lateLimit) ||
             15,
 
         nightBill:
             Number($("nightBill")?.value) ||
-            Number(stored.nightBill) ||
+            Number(s.nightBill) ||
             100
     };
 }
 
 function loadSettings() {
-    const stored = activeWorker().settings || {};
+    const worker = activeWorker();
+    const s = worker.settings || {};
 
     const fields = [
         "salary",
@@ -126,9 +133,9 @@ function loadSettings() {
         "nightBill"
     ];
 
-    fields.forEach(key => {
-        if (stored[key] !== undefined && $(key)) {
-            $(key).value = stored[key];
+    fields.forEach((key) => {
+        if (s[key] !== undefined && $(key)) {
+            $(key).value = s[key];
         }
     });
 
@@ -155,22 +162,18 @@ function loadSettings() {
     if ($("nightBill") && !$("nightBill").value) {
         $("nightBill").value = "100";
     }
-
-    if ($("otMultiplier")) {
-        $("otMultiplier").value = "2";
-    }
 }
 
 function persistSettings() {
-    activeWorker().settings = settings();
+    const worker = activeWorker();
 
-    localStorage.setItem(
-        KEY,
-        JSON.stringify(data)
-    );
+    worker.settings = settings();
+
+    localStorage.setItem(KEY, JSON.stringify(data));
 
     renderAll();
 }
+
 
 /* =========================================================
    TIME FUNCTIONS
@@ -181,17 +184,18 @@ function minutes(time) {
         return 0;
     }
 
-    const [hours, mins] = time
-        .split(":")
-        .map(Number);
+    const parts = time.split(":").map(Number);
 
-    return hours * 60 + mins;
+    return parts[0] * 60 + parts[1];
 }
 
+
 /*
- * Calculates duration between IN and OUT.
- * If OUT is equal to or earlier than IN,
- * OUT is considered to be on the next day.
+ * Calculates elapsed time between two clock times.
+ *
+ * Example:
+ * 20:00 -> 04:00 = 8 hours
+ * 08:00 -> 00:06 = 16 hours 6 minutes
  */
 function duration(inTime, outTime) {
     let start = minutes(inTime);
@@ -204,53 +208,34 @@ function duration(inTime, outTime) {
     return end - start;
 }
 
-/*
- * Returns whether duty crossed midnight.
- */
-function crossedMidnight(inTime, outTime) {
-    return minutes(outTime) <= minutes(inTime);
-}
 
 /*
- * Converts a clock time to elapsed time from duty start.
+ * Converts a clock time to the same timeline as the duty start.
+ *
+ * Example:
+ * start = 20:00
+ * out   = 04:00
+ *
+ * out becomes 1680 minutes instead of 240.
  */
-function elapsedFromStart(inTime, outTime, clockTime) {
-    const start = minutes(inTime);
-
-    let end = minutes(outTime);
+function elapsedTime(inTime, clockTime) {
+    let start = minutes(inTime);
     let point = minutes(clockTime);
-
-    if (end <= start) {
-        end += 1440;
-    }
 
     if (point < start) {
         point += 1440;
     }
 
-    return {
-        start,
-        end,
-        point
-    };
+    return point;
 }
 
-/* =========================================================
-   HOLIDAY LUNCH
-========================================================= */
 
 /*
- * Holiday Duty:
+ * Calculates overlap with 13:00 - 14:00 lunch.
  *
- * 13:00 - 14:00
- * = fixed 1 hour lunch break.
- *
- * The lunch period is removed only if the actual
- * duty interval overlaps it.
- *
- * This works correctly even if the duty crosses midnight.
+ * This is mainly used for Holiday Day Duty.
  */
-function lunchOverlapHoliday(inTime, outTime) {
+function lunchOverlap(inTime, outTime) {
     let start = minutes(inTime);
     let end = minutes(outTime);
 
@@ -261,23 +246,27 @@ function lunchOverlapHoliday(inTime, outTime) {
     let lunchStart = 13 * 60;
     let lunchEnd = 14 * 60;
 
+    /*
+     * If the duty starts after midnight and the lunch
+     * period belongs to the next timeline, adjust it.
+     */
     if (lunchStart < start) {
         lunchStart += 1440;
         lunchEnd += 1440;
     }
 
-    return Math.max(
-        0,
-        Math.min(end, lunchEnd) -
-        Math.max(start, lunchStart)
-    );
+    const overlapStart = Math.max(start, lunchStart);
+    const overlapEnd = Math.min(end, lunchEnd);
+
+    return Math.max(0, overlapEnd - overlapStart);
 }
+
 
 /* =========================================================
    MAIN CALCULATION
 ========================================================= */
 
-function calculate(record) {
+function calculate(r) {
     const s = settings();
 
     let regular = 0;
@@ -288,10 +277,11 @@ function calculate(record) {
 
     /*
      * Leave / Sick / Absent
-     * have no working hours or OT.
      */
     if (
-        ["leave", "sick", "absent"].includes(record.status)
+        ["leave", "sick", "absent"].includes(
+            r.status
+        )
     ) {
         return {
             regular,
@@ -302,10 +292,7 @@ function calculate(record) {
         };
     }
 
-    /*
-     * IN and OUT are mandatory for calculation.
-     */
-    if (!record.inTime || !record.outTime) {
+    if (!r.inTime || !r.outTime) {
         return {
             regular,
             ot,
@@ -316,78 +303,121 @@ function calculate(record) {
     }
 
     const totalMinutes = duration(
-        record.inTime,
-        record.outTime
+        r.inTime,
+        r.outTime
     );
 
     const totalHours = totalMinutes / 60;
 
-    const inM = minutes(record.inTime);
-    const outM = minutes(record.outTime);
+    const inM = minutes(r.inTime);
+    const outM = minutes(r.outTime);
 
-    /* =====================================================
-       HOLIDAY DUTY
-    ===================================================== */
+    /*
+     * =====================================================
+     * HOLIDAY DUTY
+     * =====================================================
+     *
+     * Holiday duty can be Day or Night.
+     *
+     * All worked time is OT.
+     *
+     * Holiday Day Duty:
+     * 13:00 - 14:00 lunch = 1 hour deduction.
+     *
+     * Holiday Night Duty:
+     * No lunch deduction.
+     *
+     * No late is counted on holidays.
+     */
 
-    if (record.dutyType === "holiday") {
+    if (r.dutyType === "holiday") {
+        let holidayOtMinutes = totalMinutes;
 
         /*
-         * Holiday has NO LATE.
+         * Day holiday duty gets 13:00-14:00 lunch deduction.
+         */
+        if (
+            r.holidayShift === "day" ||
+            r.shift === "day"
+        ) {
+            const lunchMinutes = lunchOverlap(
+                r.inTime,
+                r.outTime
+            );
+
+            holidayOtMinutes =
+                Math.max(
+                    0,
+                    totalMinutes - lunchMinutes
+                );
+        }
+
+        /*
+         * If no holidayShift/shift is stored,
+         * determine by start time.
          *
-         * No matter whether the worker comes 15 minutes,
-         * 1 hour or 2 hours late, it will NOT affect
-         * attendance bonus.
+         * Before 18:00 = Day
+         * 18:00 or later = Night
+         */
+        if (
+            r.holidayShift !== "day" &&
+            r.holidayShift !== "night" &&
+            r.shift !== "day" &&
+            r.shift !== "night"
+        ) {
+            if (inM < 18 * 60) {
+                const lunchMinutes = lunchOverlap(
+                    r.inTime,
+                    r.outTime
+                );
+
+                holidayOtMinutes =
+                    Math.max(
+                        0,
+                        totalMinutes - lunchMinutes
+                    );
+            }
+        }
+
+        ot = holidayOtMinutes / 60;
+
+        /*
+         * Holiday has NO late.
          */
         late = 0;
 
         /*
-         * Entire Holiday Duty is OT.
-         *
-         * But 13:00 - 14:00 lunch is deducted.
+         * If holiday duty crosses midnight,
+         * add Night Bill.
          */
-        const lunchMinutes =
-            lunchOverlapHoliday(
-                record.inTime,
-                record.outTime
-            );
-
-        ot = Math.max(
-            0,
-            totalMinutes - lunchMinutes
-        ) / 60;
-
-        regular = 0;
-
-        /*
-         * Holiday duty crossing midnight
-         * receives Night Bill.
-         */
-        if (crossedMidnight(record.inTime, record.outTime)) {
+        if (outM <= inM) {
             night = s.nightBill;
         }
 
         return {
-            regular,
+            regular: 0,
             ot,
-            late,
-            early,
+            late: 0,
+            early: false,
             night
         };
     }
 
-    /* =====================================================
-       NIGHT DUTY
-    ===================================================== */
 
-    if (record.dutyType === "night") {
+    /*
+     * =====================================================
+     * NIGHT DUTY
+     * =====================================================
+     *
+     * Normal Night:
+     * 20:00 -> 04:00 = 8 hours regular
+     * After 04:00 = OT
+     *
+     * Midnight crossing is automatically handled.
+     */
 
-        /*
-         * Normal Night Duty:
-         *
-         * 20:00 IN
-         * 04:00 = 8 hours General Duty
-         * After 04:00 = OT
-         */
+    if (r.dutyType === "night") {
+
         regular = Math.min(
             s.regularHours,
             totalHours
@@ -399,12 +429,119 @@ function calculate(record) {
         );
 
         /*
-         * Night Duty normally crosses midnight.
-         *
-         * Night Bill is added whenever OUT is on
-         * the next calendar day.
+         * Night Bill:
+         * Any night duty crossing midnight
+         * receives ৳100.
          */
-        if (crossedMidnight(record.inTime, record.outTime)) {
+        if (outM <= inM) {
+            night = s.nightBill;
+        }
+
+        return {
+            regular,
+            ot,
+            late: 0,
+            early: false,
+            night
+        };
+    }
+
+
+    /*
+     * =====================================================
+     * NORMAL DAY DUTY
+     * =====================================================
+     *
+     * Normal Day:
+     * 08:00 -> 17:00
+     *
+     * 17:00 onward = OT.
+     *
+     * Important:
+     * If outTime is 00:06, 01:00 etc.,
+     * it belongs to the following day.
+     */
+
+    if (r.dutyType === "day") {
+
+        /*
+         * Late:
+         * Day duty expected at 08:00.
+         *
+         * Holiday already returned above,
+         * therefore holiday has no late.
+         */
+        if (inM > 8 * 60) {
+            late = inM - 8 * 60;
+        }
+
+        /*
+         * Convert out time to elapsed timeline.
+         */
+        let start = inM;
+        let end = outM;
+
+        if (end <= start) {
+            end += 1440;
+        }
+
+        /*
+         * Normal Day OT starts at 17:00.
+         */
+        let regularEnd = 17 * 60;
+
+        /*
+         * If duty started after midnight,
+         * keep 17:00 on the correct timeline.
+         */
+        if (regularEnd < start) {
+            regularEnd += 1440;
+        }
+
+        /*
+         * Regular time is up to 17:00.
+         */
+        const regularMinutes =
+            Math.max(
+                0,
+                Math.min(
+                    end,
+                    regularEnd
+                ) - start
+            );
+
+        regular =
+            Math.min(
+                s.regularHours,
+                regularMinutes / 60
+            );
+
+        /*
+         * Everything after 17:00 is OT.
+         */
+        const otMinutes =
+            Math.max(
+                0,
+                end - regularEnd
+            );
+
+        ot = otMinutes / 60;
+
+        /*
+         * If the person leaves before normal
+         * duty completion, mark early.
+         *
+         * This is used for attendance bonus logic.
+         */
+        if (end < regularEnd) {
+            early = true;
+        }
+
+        /*
+         * Day duty crossing midnight also gets
+         * Night Bill.
+         */
+        if (outM <= inM) {
             night = s.nightBill;
         }
 
@@ -417,100 +554,10 @@ function calculate(record) {
         };
     }
 
-    /* =====================================================
-       DAY DUTY
-    ===================================================== */
 
     /*
-     * Normal Day Duty:
-     *
-     * IN  = 08:00
-     * General Duty ends = 17:00
-     * After 17:00 = OT
+     * Fallback
      */
-
-    /*
-     * Late calculation.
-     *
-     * Holiday is already handled above,
-     * so only normal Day Duty reaches here.
-     */
-    if (inM > 8 * 60) {
-        late = inM - 8 * 60;
-    }
-
-    /*
-     * Convert 17:00 into elapsed minutes from
-     * the actual IN time.
-     *
-     * This is important for duties crossing midnight.
-     */
-    const elapsed =
-        elapsedFromStart(
-            record.inTime,
-            record.outTime,
-            "17:00"
-        );
-
-    let cutoff = elapsed.point;
-
-    /*
-     * If the duty starts after 17:00,
-     * the 17:00 reference belongs to the
-     * previous clock cycle, so move it forward.
-     */
-    if (cutoff < elapsed.start) {
-        cutoff += 1440;
-    }
-
-    /*
-     * OT starts at 17:00.
-     */
-    const otStart = Math.max(
-        elapsed.start,
-        cutoff
-    );
-
-    const otMinutes = Math.max(
-        0,
-        elapsed.end - otStart
-    );
-
-    ot = otMinutes / 60;
-
-    /*
-     * Regular hours are limited to configured
-     * General Duty hours.
-     */
-    regular = Math.min(
-        s.regularHours,
-        Math.max(
-            0,
-            totalHours - ot
-        )
-    );
-
-    /*
-     * If a Day Duty ends before 17:00,
-     * it is considered early.
-     */
-    if (
-        elapsed.end <
-        Math.min(
-            cutoff,
-            elapsed.start + s.regularHours * 60
-        )
-    ) {
-        early = true;
-    }
-
-    /*
-     * Day Duty crossing midnight also gets
-     * Night Bill.
-     */
-    if (crossedMidnight(record.inTime, record.outTime)) {
-        night = s.nightBill;
-    }
 
     return {
         regular,
@@ -521,6 +568,7 @@ function calculate(record) {
     };
 }
 
+
 /* =========================================================
    MONTHLY STATISTICS
 ========================================================= */
@@ -528,13 +576,13 @@ function calculate(record) {
 function monthStats() {
     const s = settings();
 
-    const currentMonth =
-        todayLocal().slice(0, 7);
+    const ym = todayLocal().slice(0, 7);
 
-    const records =
-        workerRecords().filter(
-            r => r.date.startsWith(currentMonth)
-        );
+    const rs = workerRecords().filter(
+        (r) =>
+            r.date &&
+            r.date.startsWith(ym)
+    );
 
     let present = 0;
     let absent = 0;
@@ -548,33 +596,22 @@ function monthStats() {
 
     let early = false;
 
-    records.forEach(record => {
+    rs.forEach((r) => {
 
-        const c = calculate(record);
+        const c = calculate(r);
 
-        if (record.status === "present") {
+        if (r.status === "present") {
             present++;
-        }
-
-        else if (record.status === "absent") {
+        } else if (r.status === "absent") {
             absent++;
-        }
-
-        else if (
-            ["leave", "sick"].includes(record.status)
+        } else if (
+            ["leave", "sick"].includes(
+                r.status
+            )
         ) {
             leave++;
-        }
-
-        /*
-         * Holiday count.
-         *
-         * Holiday Duty and Holiday status
-         * are both recognized.
-         */
-        else if (
-            record.status === "holiday" ||
-            record.dutyType === "holiday"
+        } else if (
+            r.status === "holiday"
         ) {
             holiday++;
         }
@@ -583,9 +620,8 @@ function monthStats() {
         ot += c.ot;
 
         /*
-         * Holiday records return late = 0,
-         * therefore they cannot affect the
-         * attendance bonus.
+         * Holiday late is already 0
+         * from calculate().
          */
         late += c.late;
 
@@ -596,36 +632,39 @@ function monthStats() {
         }
     });
 
+
     /*
-     * Hourly wage formula retained from
-     * your existing application.
+     * Hourly wage calculation.
      */
     const hourly =
-        s.salary > 0
-            ? (s.salary * 0.5605) /
-              (s.salaryDays * s.regularHours)
-            : 0;
+        s.salary /
+        (s.salaryDays * s.regularHours);
 
+    /*
+     * OT rate = hourly × 2
+     */
     const otRate =
         hourly * s.otMultiplier;
 
     const otPay =
         ot * otRate;
 
+
     /*
-     * Attendance Bonus:
+     * Attendance Bonus
      *
-     * Total monthly normal late >= 15 minutes
-     * OR early duty
-     * => bonus removed.
+     * Total monthly late:
      *
-     * Holiday lateness is already excluded
-     * because calculate() returns late = 0.
+     * <= 15 minutes = ৳625 bonus
+     * > 15 minutes = bonus lost
+     *
+     * Holiday has no late.
      */
     const bonus =
-        late >= s.lateLimit || early
+        late > s.lateLimit || early
             ? 0
             : s.attendanceBonus;
+
 
     const total =
         s.salary +
@@ -633,30 +672,26 @@ function monthStats() {
         bonus +
         night;
 
-    return {
-        records,
-        rs: records,
 
+    return {
+        rs,
         present,
         absent,
         leave,
         holiday,
-
         regular,
         ot,
         late,
         night,
-
         hourly,
         otRate,
         otPay,
-
         bonus,
         total,
-
         early
     };
 }
+
 
 /* =========================================================
    DASHBOARD
@@ -682,11 +717,11 @@ function renderDashboard() {
 
     const m = monthStats();
     const s = settings();
-    const worker = activeWorker();
+    const w = activeWorker();
 
     if ($("activeWorkerName")) {
         $("activeWorkerName").textContent =
-            worker.name;
+            w.name;
     }
 
     if ($("activeWorkerMeta")) {
@@ -734,8 +769,8 @@ function renderDashboard() {
 
         stat(
             "Late",
-            `${m.late} min`,
-            m.late >= s.lateLimit
+            m.late + " min",
+            m.late > s.lateLimit
                 ? "bad"
                 : ""
         ),
@@ -748,11 +783,14 @@ function renderDashboard() {
         stat(
             "Attendance Bonus",
             money(m.bonus),
-            m.bonus ? "ok" : "bad"
+            m.bonus
+                ? "ok"
+                : "bad"
         )
 
     ].join("");
 }
+
 
 /* =========================================================
    TODAY
@@ -764,59 +802,67 @@ function renderToday() {
         return;
     }
 
-    const record =
+    const r =
         workerRecords().find(
-            x => x.date === todayLocal()
+            (x) =>
+                x.date === todayLocal()
         );
 
-    if (!record) {
+    if (!r) {
+
         $("todayCard").innerHTML =
-            `<div class="empty">
+            `
+            <div class="empty">
                 আজকের কোনো ডিউটি সেভ করা হয়নি।
-            </div>`;
+            </div>
+            `;
 
         return;
     }
 
-    const c = calculate(record);
+    const c = calculate(r);
 
-    let dutyName = "Day Duty";
+    const dutyName =
+        r.dutyType === "night"
+            ? "Night Duty"
+            : r.dutyType === "holiday"
+                ? "Holiday Duty"
+                : "Day Duty";
 
-    if (record.dutyType === "night") {
-        dutyName = "Night Duty";
-    }
-
-    if (record.dutyType === "holiday") {
-        dutyName = "Holiday Duty";
-    }
-
-    $("todayCard").innerHTML = `
+    $("todayCard").innerHTML =
+        `
         <div class="today-row">
 
             <div>
-                <strong>${dutyName}</strong>
+                <strong>
+                    ${dutyName}
+                </strong>
+
                 <br>
 
-                <span class="badge ${record.status}">
-                    ${record.status}
+                <span class="badge ${r.status}">
+                    ${r.status}
                 </span>
             </div>
 
             <div>
-                <b>OT ${fmtHours(c.ot)} h</b>
+                <b>
+                    OT ${fmtHours(c.ot)} h
+                </b>
 
                 <br>
 
                 <small>
-                    ${record.inTime || "-"}
+                    ${r.inTime || "-"}
                     →
-                    ${record.outTime || "-"}
+                    ${r.outTime || "-"}
                 </small>
             </div>
 
         </div>
-    `;
+        `;
 }
+
 
 /* =========================================================
    RECENT RECORDS
@@ -828,39 +874,42 @@ function renderRecent() {
         return;
     }
 
-    const records =
+    const rs =
         workerRecords()
             .slice()
             .sort(
                 (a, b) =>
-                    b.date.localeCompare(a.date)
+                    b.date.localeCompare(
+                        a.date
+                    )
             )
             .slice(0, 5);
 
-    if (!records.length) {
+    if (!rs.length) {
+
         $("recentRecords").innerHTML =
-            `<div class="empty">
+            `
+            <div class="empty">
                 এখনও কোনো রেকর্ড নেই।
-            </div>`;
+            </div>
+            `;
 
         return;
     }
 
     $("recentRecords").innerHTML =
-        records
-            .map(record => {
+        rs
+            .map((r) => {
 
-                const c = calculate(record);
+                const c =
+                    calculate(r);
 
-                let dutyName = "Day";
-
-                if (record.dutyType === "night") {
-                    dutyName = "Night";
-                }
-
-                if (record.dutyType === "holiday") {
-                    dutyName = "Holiday";
-                }
+                const dutyName =
+                    r.dutyType === "night"
+                        ? "Night"
+                        : r.dutyType === "holiday"
+                            ? "Holiday"
+                            : "Day";
 
                 return `
                     <div
@@ -872,13 +921,14 @@ function renderRecent() {
                     >
 
                         <div>
-                            <b>${record.date}</b>
+                            <b>${r.date}</b>
+
                             <br>
 
                             <small>
                                 ${dutyName}
                                 •
-                                ${record.status}
+                                ${r.status}
                             </small>
                         </div>
 
@@ -900,8 +950,9 @@ function renderRecent() {
             .join("");
 }
 
+
 /* =========================================================
-   RECORD TABLE
+   RECORDS TABLE
 ========================================================= */
 
 function renderRecords() {
@@ -914,25 +965,23 @@ function renderRecords() {
         ($("recordSearch")?.value || "")
             .toLowerCase();
 
-    let records =
+    let rs =
         workerRecords()
             .slice()
             .sort(
                 (a, b) =>
-                    b.date.localeCompare(a.date)
+                    b.date.localeCompare(
+                        a.date
+                    )
             );
 
     if (q) {
-        records = records.filter(record => {
 
-            const text = [
-                record.date,
-                record.status,
-                record.dutyType,
-                record.notes || ""
-            ]
-                .join(" ")
-                .toLowerCase();
+        rs = rs.filter((r) => {
+
+            const text =
+                `${r.date} ${r.status} ${r.dutyType} ${r.notes || ""}`
+                    .toLowerCase();
 
             return text.includes(q);
         });
@@ -940,41 +989,18 @@ function renderRecords() {
 
     if ($("recordCount")) {
         $("recordCount").textContent =
-            `${records.length}টি রেকর্ড`;
+            `${rs.length}টি রেকর্ড`;
     }
 
-    $("records").innerHTML =
-        records.length
-            ? records.map(record => {
+    if (!rs.length) {
 
-                const c = calculate(record);
-
-                let dutyName = "Day";
-
-                if (record.dutyType === "night") {
-                    dutyName = "Night";
-                }
-
-                if (record.dutyType === "holiday") {
-                    dutyName = "Holiday";
-                }
-
-                return `
-                    <tr>
-
-                        <td>${record.date}</td>
-
-                        <td>${dutyName}</td>
-
-                        <td>${record.status}</td>
-
-                        <td>
-                            ${record.inTime || "-"}
-                        </td>
-
-                        <td>
-                            ${record.outTime || "-"}
-                        </td>
-
-                        <td>
-                  
+        $("records").innerHTML =
+            `
+            <tr>
+                <td
+                    colspan="10"
+                    class="empty"
+                >
+                    কোনো রেকর্ড পাওয়া যায়নি।
+                </td>
+        
