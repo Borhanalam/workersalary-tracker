@@ -1,0 +1,980 @@
+const KEY = "amarOvertime_v2";
+
+let data = JSON.parse(localStorage.getItem(KEY) || "null");
+
+if (!data) {
+    data = {
+        activeWorkerId: 1,
+        workers: [
+            {
+                id: 1,
+                name: "আমার হিসাব",
+                settings: {}
+            }
+        ],
+        records: {
+            1: []
+        }
+    };
+}
+
+if (!Array.isArray(data.workers) || data.workers.length === 0) {
+    data.workers = [
+        {
+            id: 1,
+            name: "আমার হিসাব",
+            settings: {}
+        }
+    ];
+
+    data.activeWorkerId = 1;
+}
+
+data.records = data.records || {};
+
+const $ = id => document.getElementById(id);
+
+function activeWorker() {
+    return (
+        data.workers.find(w => w.id === data.activeWorkerId) ||
+        data.workers[0]
+    );
+}
+
+function workerRecords() {
+    const worker = activeWorker();
+
+    if (!data.records[worker.id]) {
+        data.records[worker.id] = [];
+    }
+
+    return data.records[worker.id];
+}
+
+function save() {
+    localStorage.setItem(KEY, JSON.stringify(data));
+    renderAll();
+}
+
+function todayLocal() {
+    const d = new Date();
+    const offset = d.getTimezoneOffset();
+
+    return new Date(
+        d.getTime() - offset * 60000
+    ).toISOString().slice(0, 10);
+}
+
+function money(n) {
+    return "৳" + (Number(n) || 0).toFixed(2);
+}
+
+function fmtHours(n) {
+    return (Number(n) || 0).toFixed(2);
+}
+
+/* =========================================================
+   SETTINGS
+========================================================= */
+
+function settings() {
+    const worker = activeWorker();
+    const stored = worker.settings || {};
+
+    return {
+        salary: Number($("salary")?.value) || 0,
+
+        salaryDays:
+            Number($("salaryDays")?.value) ||
+            Number(stored.salaryDays) ||
+            26,
+
+        regularHours:
+            Number($("regularHours")?.value) ||
+            Number(stored.regularHours) ||
+            8,
+
+        otMultiplier: 2,
+
+        attendanceBonus:
+            Number($("attendanceBonus")?.value) ||
+            Number(stored.attendanceBonus) ||
+            625,
+
+        lateLimit:
+            Number($("lateLimit")?.value) ||
+            Number(stored.lateLimit) ||
+            15,
+
+        nightBill:
+            Number($("nightBill")?.value) ||
+            Number(stored.nightBill) ||
+            100
+    };
+}
+
+function loadSettings() {
+    const stored = activeWorker().settings || {};
+
+    const fields = [
+        "salary",
+        "salaryDays",
+        "regularHours",
+        "otMultiplier",
+        "attendanceBonus",
+        "lateLimit",
+        "nightBill"
+    ];
+
+    fields.forEach(key => {
+        if (stored[key] !== undefined && $(key)) {
+            $(key).value = stored[key];
+        }
+    });
+
+    if ($("salary") && !$("salary").value) {
+        $("salary").value = "15000";
+    }
+
+    if ($("salaryDays") && !$("salaryDays").value) {
+        $("salaryDays").value = "26";
+    }
+
+    if ($("regularHours") && !$("regularHours").value) {
+        $("regularHours").value = "8";
+    }
+
+    if ($("attendanceBonus") && !$("attendanceBonus").value) {
+        $("attendanceBonus").value = "625";
+    }
+
+    if ($("lateLimit") && !$("lateLimit").value) {
+        $("lateLimit").value = "15";
+    }
+
+    if ($("nightBill") && !$("nightBill").value) {
+        $("nightBill").value = "100";
+    }
+
+    if ($("otMultiplier")) {
+        $("otMultiplier").value = "2";
+    }
+}
+
+function persistSettings() {
+    activeWorker().settings = settings();
+
+    localStorage.setItem(
+        KEY,
+        JSON.stringify(data)
+    );
+
+    renderAll();
+}
+
+/* =========================================================
+   TIME FUNCTIONS
+========================================================= */
+
+function minutes(time) {
+    if (!time || !time.includes(":")) {
+        return 0;
+    }
+
+    const [hours, mins] = time
+        .split(":")
+        .map(Number);
+
+    return hours * 60 + mins;
+}
+
+/*
+ * Calculates duration between IN and OUT.
+ * If OUT is equal to or earlier than IN,
+ * OUT is considered to be on the next day.
+ */
+function duration(inTime, outTime) {
+    let start = minutes(inTime);
+    let end = minutes(outTime);
+
+    if (end <= start) {
+        end += 1440;
+    }
+
+    return end - start;
+}
+
+/*
+ * Returns whether duty crossed midnight.
+ */
+function crossedMidnight(inTime, outTime) {
+    return minutes(outTime) <= minutes(inTime);
+}
+
+/*
+ * Converts a clock time to elapsed time from duty start.
+ */
+function elapsedFromStart(inTime, outTime, clockTime) {
+    const start = minutes(inTime);
+
+    let end = minutes(outTime);
+    let point = minutes(clockTime);
+
+    if (end <= start) {
+        end += 1440;
+    }
+
+    if (point < start) {
+        point += 1440;
+    }
+
+    return {
+        start,
+        end,
+        point
+    };
+}
+
+/* =========================================================
+   HOLIDAY LUNCH
+========================================================= */
+
+/*
+ * Holiday Duty:
+ *
+ * 13:00 - 14:00
+ * = fixed 1 hour lunch break.
+ *
+ * The lunch period is removed only if the actual
+ * duty interval overlaps it.
+ *
+ * This works correctly even if the duty crosses midnight.
+ */
+function lunchOverlapHoliday(inTime, outTime) {
+    let start = minutes(inTime);
+    let end = minutes(outTime);
+
+    if (end <= start) {
+        end += 1440;
+    }
+
+    let lunchStart = 13 * 60;
+    let lunchEnd = 14 * 60;
+
+    if (lunchStart < start) {
+        lunchStart += 1440;
+        lunchEnd += 1440;
+    }
+
+    return Math.max(
+        0,
+        Math.min(end, lunchEnd) -
+        Math.max(start, lunchStart)
+    );
+}
+
+/* =========================================================
+   MAIN CALCULATION
+========================================================= */
+
+function calculate(record) {
+    const s = settings();
+
+    let regular = 0;
+    let ot = 0;
+    let late = 0;
+    let early = false;
+    let night = 0;
+
+    /*
+     * Leave / Sick / Absent
+     * have no working hours or OT.
+     */
+    if (
+        ["leave", "sick", "absent"].includes(record.status)
+    ) {
+        return {
+            regular,
+            ot,
+            late,
+            early,
+            night
+        };
+    }
+
+    /*
+     * IN and OUT are mandatory for calculation.
+     */
+    if (!record.inTime || !record.outTime) {
+        return {
+            regular,
+            ot,
+            late,
+            early,
+            night
+        };
+    }
+
+    const totalMinutes = duration(
+        record.inTime,
+        record.outTime
+    );
+
+    const totalHours = totalMinutes / 60;
+
+    const inM = minutes(record.inTime);
+    const outM = minutes(record.outTime);
+
+    /* =====================================================
+       HOLIDAY DUTY
+    ===================================================== */
+
+    if (record.dutyType === "holiday") {
+
+        /*
+         * Holiday has NO LATE.
+         *
+         * No matter whether the worker comes 15 minutes,
+         * 1 hour or 2 hours late, it will NOT affect
+         * attendance bonus.
+         */
+        late = 0;
+
+        /*
+         * Entire Holiday Duty is OT.
+         *
+         * But 13:00 - 14:00 lunch is deducted.
+         */
+        const lunchMinutes =
+            lunchOverlapHoliday(
+                record.inTime,
+                record.outTime
+            );
+
+        ot = Math.max(
+            0,
+            totalMinutes - lunchMinutes
+        ) / 60;
+
+        regular = 0;
+
+        /*
+         * Holiday duty crossing midnight
+         * receives Night Bill.
+         */
+        if (crossedMidnight(record.inTime, record.outTime)) {
+            night = s.nightBill;
+        }
+
+        return {
+            regular,
+            ot,
+            late,
+            early,
+            night
+        };
+    }
+
+    /* =====================================================
+       NIGHT DUTY
+    ===================================================== */
+
+    if (record.dutyType === "night") {
+
+        /*
+         * Normal Night Duty:
+         *
+         * 20:00 IN
+         * 04:00 = 8 hours General Duty
+         * After 04:00 = OT
+         */
+        regular = Math.min(
+            s.regularHours,
+            totalHours
+        );
+
+        ot = Math.max(
+            0,
+            totalHours - s.regularHours
+        );
+
+        /*
+         * Night Duty normally crosses midnight.
+         *
+         * Night Bill is added whenever OUT is on
+         * the next calendar day.
+         */
+        if (crossedMidnight(record.inTime, record.outTime)) {
+            night = s.nightBill;
+        }
+
+        return {
+            regular,
+            ot,
+            late,
+            early,
+            night
+        };
+    }
+
+    /* =====================================================
+       DAY DUTY
+    ===================================================== */
+
+    /*
+     * Normal Day Duty:
+     *
+     * IN  = 08:00
+     * General Duty ends = 17:00
+     * After 17:00 = OT
+     */
+
+    /*
+     * Late calculation.
+     *
+     * Holiday is already handled above,
+     * so only normal Day Duty reaches here.
+     */
+    if (inM > 8 * 60) {
+        late = inM - 8 * 60;
+    }
+
+    /*
+     * Convert 17:00 into elapsed minutes from
+     * the actual IN time.
+     *
+     * This is important for duties crossing midnight.
+     */
+    const elapsed =
+        elapsedFromStart(
+            record.inTime,
+            record.outTime,
+            "17:00"
+        );
+
+    let cutoff = elapsed.point;
+
+    /*
+     * If the duty starts after 17:00,
+     * the 17:00 reference belongs to the
+     * previous clock cycle, so move it forward.
+     */
+    if (cutoff < elapsed.start) {
+        cutoff += 1440;
+    }
+
+    /*
+     * OT starts at 17:00.
+     */
+    const otStart = Math.max(
+        elapsed.start,
+        cutoff
+    );
+
+    const otMinutes = Math.max(
+        0,
+        elapsed.end - otStart
+    );
+
+    ot = otMinutes / 60;
+
+    /*
+     * Regular hours are limited to configured
+     * General Duty hours.
+     */
+    regular = Math.min(
+        s.regularHours,
+        Math.max(
+            0,
+            totalHours - ot
+        )
+    );
+
+    /*
+     * If a Day Duty ends before 17:00,
+     * it is considered early.
+     */
+    if (
+        elapsed.end <
+        Math.min(
+            cutoff,
+            elapsed.start + s.regularHours * 60
+        )
+    ) {
+        early = true;
+    }
+
+    /*
+     * Day Duty crossing midnight also gets
+     * Night Bill.
+     */
+    if (crossedMidnight(record.inTime, record.outTime)) {
+        night = s.nightBill;
+    }
+
+    return {
+        regular,
+        ot,
+        late,
+        early,
+        night
+    };
+}
+
+/* =========================================================
+   MONTHLY STATISTICS
+========================================================= */
+
+function monthStats() {
+    const s = settings();
+
+    const currentMonth =
+        todayLocal().slice(0, 7);
+
+    const records =
+        workerRecords().filter(
+            r => r.date.startsWith(currentMonth)
+        );
+
+    let present = 0;
+    let absent = 0;
+    let leave = 0;
+    let holiday = 0;
+
+    let regular = 0;
+    let ot = 0;
+    let late = 0;
+    let night = 0;
+
+    let early = false;
+
+    records.forEach(record => {
+
+        const c = calculate(record);
+
+        if (record.status === "present") {
+            present++;
+        }
+
+        else if (record.status === "absent") {
+            absent++;
+        }
+
+        else if (
+            ["leave", "sick"].includes(record.status)
+        ) {
+            leave++;
+        }
+
+        /*
+         * Holiday count.
+         *
+         * Holiday Duty and Holiday status
+         * are both recognized.
+         */
+        else if (
+            record.status === "holiday" ||
+            record.dutyType === "holiday"
+        ) {
+            holiday++;
+        }
+
+        regular += c.regular;
+        ot += c.ot;
+
+        /*
+         * Holiday records return late = 0,
+         * therefore they cannot affect the
+         * attendance bonus.
+         */
+        late += c.late;
+
+        night += c.night;
+
+        if (c.early) {
+            early = true;
+        }
+    });
+
+    /*
+     * Hourly wage formula retained from
+     * your existing application.
+     */
+    const hourly =
+        s.salary > 0
+            ? (s.salary * 0.5605) /
+              (s.salaryDays * s.regularHours)
+            : 0;
+
+    const otRate =
+        hourly * s.otMultiplier;
+
+    const otPay =
+        ot * otRate;
+
+    /*
+     * Attendance Bonus:
+     *
+     * Total monthly normal late >= 15 minutes
+     * OR early duty
+     * => bonus removed.
+     *
+     * Holiday lateness is already excluded
+     * because calculate() returns late = 0.
+     */
+    const bonus =
+        late >= s.lateLimit || early
+            ? 0
+            : s.attendanceBonus;
+
+    const total =
+        s.salary +
+        otPay +
+        bonus +
+        night;
+
+    return {
+        records,
+        rs: records,
+
+        present,
+        absent,
+        leave,
+        holiday,
+
+        regular,
+        ot,
+        late,
+        night,
+
+        hourly,
+        otRate,
+        otPay,
+
+        bonus,
+        total,
+
+        early
+    };
+}
+
+/* =========================================================
+   DASHBOARD
+========================================================= */
+
+function stat(
+    title,
+    value,
+    cls = "",
+    primary = false
+) {
+    return `
+        <div class="stat ${primary ? "primary" : ""}">
+            <small>${title}</small>
+            <strong class="${cls}">
+                ${value}
+            </strong>
+        </div>
+    `;
+}
+
+function renderDashboard() {
+
+    const m = monthStats();
+    const s = settings();
+    const worker = activeWorker();
+
+    if ($("activeWorkerName")) {
+        $("activeWorkerName").textContent =
+            worker.name;
+    }
+
+    if ($("activeWorkerMeta")) {
+        $("activeWorkerMeta").textContent =
+            `${todayLocal().slice(0, 7)} • মাসিক হিসাব`;
+    }
+
+    if (!$("dashboard")) {
+        return;
+    }
+
+    $("dashboard").innerHTML = [
+
+        stat(
+            "এই মাসের মোট বেতন",
+            money(m.total),
+            "",
+            true
+        ),
+
+        stat(
+            "Present",
+            m.present
+        ),
+
+        stat(
+            "Regular Hours",
+            fmtHours(m.regular)
+        ),
+
+        stat(
+            "OT Hours",
+            fmtHours(m.ot)
+        ),
+
+        stat(
+            "OT Rate",
+            money(m.otRate)
+        ),
+
+        stat(
+            "OT Wage",
+            money(m.otPay)
+        ),
+
+        stat(
+            "Late",
+            `${m.late} min`,
+            m.late >= s.lateLimit
+                ? "bad"
+                : ""
+        ),
+
+        stat(
+            "Night Bill",
+            money(m.night)
+        ),
+
+        stat(
+            "Attendance Bonus",
+            money(m.bonus),
+            m.bonus ? "ok" : "bad"
+        )
+
+    ].join("");
+}
+
+/* =========================================================
+   TODAY
+========================================================= */
+
+function renderToday() {
+
+    if (!$("todayCard")) {
+        return;
+    }
+
+    const record =
+        workerRecords().find(
+            x => x.date === todayLocal()
+        );
+
+    if (!record) {
+        $("todayCard").innerHTML =
+            `<div class="empty">
+                আজকের কোনো ডিউটি সেভ করা হয়নি।
+            </div>`;
+
+        return;
+    }
+
+    const c = calculate(record);
+
+    let dutyName = "Day Duty";
+
+    if (record.dutyType === "night") {
+        dutyName = "Night Duty";
+    }
+
+    if (record.dutyType === "holiday") {
+        dutyName = "Holiday Duty";
+    }
+
+    $("todayCard").innerHTML = `
+        <div class="today-row">
+
+            <div>
+                <strong>${dutyName}</strong>
+                <br>
+
+                <span class="badge ${record.status}">
+                    ${record.status}
+                </span>
+            </div>
+
+            <div>
+                <b>OT ${fmtHours(c.ot)} h</b>
+
+                <br>
+
+                <small>
+                    ${record.inTime || "-"}
+                    →
+                    ${record.outTime || "-"}
+                </small>
+            </div>
+
+        </div>
+    `;
+}
+
+/* =========================================================
+   RECENT RECORDS
+========================================================= */
+
+function renderRecent() {
+
+    if (!$("recentRecords")) {
+        return;
+    }
+
+    const records =
+        workerRecords()
+            .slice()
+            .sort(
+                (a, b) =>
+                    b.date.localeCompare(a.date)
+            )
+            .slice(0, 5);
+
+    if (!records.length) {
+        $("recentRecords").innerHTML =
+            `<div class="empty">
+                এখনও কোনো রেকর্ড নেই।
+            </div>`;
+
+        return;
+    }
+
+    $("recentRecords").innerHTML =
+        records
+            .map(record => {
+
+                const c = calculate(record);
+
+                let dutyName = "Day";
+
+                if (record.dutyType === "night") {
+                    dutyName = "Night";
+                }
+
+                if (record.dutyType === "holiday") {
+                    dutyName = "Holiday";
+                }
+
+                return `
+                    <div
+                        class="record-row"
+                        style="
+                            padding:10px 0;
+                            border-bottom:1px solid #e2e8f0
+                        "
+                    >
+
+                        <div>
+                            <b>${record.date}</b>
+                            <br>
+
+                            <small>
+                                ${dutyName}
+                                •
+                                ${record.status}
+                            </small>
+                        </div>
+
+                        <div>
+                            <b>
+                                OT ${fmtHours(c.ot)}h
+                            </b>
+
+                            <br>
+
+                            <small>
+                                ${money(c.night)}
+                            </small>
+                        </div>
+
+                    </div>
+                `;
+            })
+            .join("");
+}
+
+/* =========================================================
+   RECORD TABLE
+========================================================= */
+
+function renderRecords() {
+
+    if (!$("records")) {
+        return;
+    }
+
+    const q =
+        ($("recordSearch")?.value || "")
+            .toLowerCase();
+
+    let records =
+        workerRecords()
+            .slice()
+            .sort(
+                (a, b) =>
+                    b.date.localeCompare(a.date)
+            );
+
+    if (q) {
+        records = records.filter(record => {
+
+            const text = [
+                record.date,
+                record.status,
+                record.dutyType,
+                record.notes || ""
+            ]
+                .join(" ")
+                .toLowerCase();
+
+            return text.includes(q);
+        });
+    }
+
+    if ($("recordCount")) {
+        $("recordCount").textContent =
+            `${records.length}টি রেকর্ড`;
+    }
+
+    $("records").innerHTML =
+        records.length
+            ? records.map(record => {
+
+                const c = calculate(record);
+
+                let dutyName = "Day";
+
+                if (record.dutyType === "night") {
+                    dutyName = "Night";
+                }
+
+                if (record.dutyType === "holiday") {
+                    dutyName = "Holiday";
+                }
+
+                return `
+                    <tr>
+
+                        <td>${record.date}</td>
+
+                        <td>${dutyName}</td>
+
+                        <td>${record.status}</td>
+
+                        <td>
+                            ${record.inTime || "-"}
+                        </td>
+
+                        <td>
+                            ${record.outTime || "-"}
+                        </td>
+
+                        <td>
+                  
