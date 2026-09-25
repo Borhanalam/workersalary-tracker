@@ -30,7 +30,7 @@ if (!Array.isArray(data.workers) || data.workers.length === 0) {
     data.activeWorkerId = 1;
 }
 
-if (!data.records || typeof data.records !== "object") {
+if (!data.records) {
     data.records = {};
 }
 
@@ -39,7 +39,7 @@ const $ = (id) => document.getElementById(id);
 function activeWorker() {
     return (
         data.workers.find(
-            (w) => w.id === data.activeWorkerId
+            (worker) => worker.id === data.activeWorkerId
         ) || data.workers[0]
     );
 }
@@ -70,14 +70,13 @@ function todayLocal() {
         .slice(0, 10);
 }
 
-function money(n) {
-    return "৳" + (Number(n) || 0).toFixed(2);
+function money(value) {
+    return "৳" + (Number(value) || 0).toFixed(2);
 }
 
-function fmtHours(n) {
-    return (Number(n) || 0).toFixed(2);
+function fmtHours(value) {
+    return (Number(value) || 0).toFixed(2);
 }
-
 
 /* =========================================================
    SETTINGS
@@ -85,43 +84,47 @@ function fmtHours(n) {
 
 function settings() {
     const worker = activeWorker();
-    const s = worker.settings || {};
+    const saved = worker.settings || {};
 
     return {
-        salary: Number($("salary")?.value) || Number(s.salary) || 15000,
+        salary: Number(
+            $("salary")?.value || saved.salary || 0
+        ),
 
-        salaryDays:
-            Number($("salaryDays")?.value) ||
-            Number(s.salaryDays) ||
-            26,
+        salaryDays: Number(
+            $("salaryDays")?.value || saved.salaryDays || 26
+        ),
 
-        regularHours:
-            Number($("regularHours")?.value) ||
-            Number(s.regularHours) ||
-            8,
+        regularHours: Number(
+            $("regularHours")?.value || saved.regularHours || 8
+        ),
 
-        otMultiplier: 2,
+        otMultiplier: Number(
+            $("otMultiplier")?.value || saved.otMultiplier || 2
+        ),
 
-        attendanceBonus:
-            Number($("attendanceBonus")?.value) ||
-            Number(s.attendanceBonus) ||
-            625,
+        attendanceBonus: Number(
+            $("attendanceBonus")?.value ||
+            saved.attendanceBonus ||
+            625
+        ),
 
-        lateLimit:
-            Number($("lateLimit")?.value) ||
-            Number(s.lateLimit) ||
-            15,
+        lateLimit: Number(
+            $("lateLimit")?.value ||
+            saved.lateLimit ||
+            15
+        ),
 
-        nightBill:
-            Number($("nightBill")?.value) ||
-            Number(s.nightBill) ||
+        nightBill: Number(
+            $("nightBill")?.value ||
+            saved.nightBill ||
             100
+        )
     };
 }
 
 function loadSettings() {
-    const worker = activeWorker();
-    const s = worker.settings || {};
+    const saved = activeWorker().settings || {};
 
     const fields = [
         "salary",
@@ -134,8 +137,8 @@ function loadSettings() {
     ];
 
     fields.forEach((key) => {
-        if (s[key] !== undefined && $(key)) {
-            $(key).value = s[key];
+        if (saved[key] !== undefined && $(key)) {
+            $(key).value = saved[key];
         }
     });
 
@@ -149,6 +152,10 @@ function loadSettings() {
 
     if ($("regularHours") && !$("regularHours").value) {
         $("regularHours").value = "8";
+    }
+
+    if ($("otMultiplier") && !$("otMultiplier").value) {
+        $("otMultiplier").value = "2";
     }
 
     if ($("attendanceBonus") && !$("attendanceBonus").value) {
@@ -165,15 +172,15 @@ function loadSettings() {
 }
 
 function persistSettings() {
-    const worker = activeWorker();
+    activeWorker().settings = settings();
 
-    worker.settings = settings();
-
-    localStorage.setItem(KEY, JSON.stringify(data));
+    localStorage.setItem(
+        KEY,
+        JSON.stringify(data)
+    );
 
     renderAll();
 }
-
 
 /* =========================================================
    TIME FUNCTIONS
@@ -186,16 +193,18 @@ function minutes(time) {
 
     const parts = time.split(":").map(Number);
 
-    return parts[0] * 60 + parts[1];
+    const h = Number(parts[0]) || 0;
+    const m = Number(parts[1]) || 0;
+
+    return h * 60 + m;
 }
 
-
 /*
- * Calculates elapsed time between two clock times.
+ * Calculates elapsed minutes.
  *
  * Example:
- * 20:00 -> 04:00 = 8 hours
- * 08:00 -> 00:06 = 16 hours 6 minutes
+ * 20:00 -> 04:00 = 480 minutes
+ * 08:00 -> 00:06 = 966 minutes
  */
 function duration(inTime, outTime) {
     let start = minutes(inTime);
@@ -205,21 +214,18 @@ function duration(inTime, outTime) {
         end += 1440;
     }
 
-    return end - start;
+    return Math.max(0, end - start);
 }
 
-
 /*
- * Converts a clock time to the same timeline as the duty start.
- *
- * Example:
- * start = 20:00
- * out   = 04:00
- *
- * out becomes 1680 minutes instead of 240.
+ * Converts a clock time into the same elapsed-day timeline
+ * starting from the employee's In Time.
  */
-function elapsedTime(inTime, clockTime) {
-    let start = minutes(inTime);
+function elapsedTimeFromStart(
+    inTime,
+    clockTime
+) {
+    const start = minutes(inTime);
     let point = minutes(clockTime);
 
     if (point < start) {
@@ -229,13 +235,15 @@ function elapsedTime(inTime, clockTime) {
     return point;
 }
 
+/* =========================================================
+   HOLIDAY LUNCH
+   13:00 - 14:00
+========================================================= */
 
-/*
- * Calculates overlap with 13:00 - 14:00 lunch.
- *
- * This is mainly used for Holiday Day Duty.
- */
-function lunchOverlap(inTime, outTime) {
+function holidayLunchOverlap(
+    inTime,
+    outTime
+) {
     let start = minutes(inTime);
     let end = minutes(outTime);
 
@@ -247,26 +255,51 @@ function lunchOverlap(inTime, outTime) {
     let lunchEnd = 14 * 60;
 
     /*
-     * If the duty starts after midnight and the lunch
-     * period belongs to the next timeline, adjust it.
+     * If the shift starts after midnight or otherwise
+     * crosses a day boundary, align lunch with the
+     * same timeline.
      */
-    if (lunchStart < start) {
+    while (lunchStart < start) {
         lunchStart += 1440;
         lunchEnd += 1440;
     }
 
-    const overlapStart = Math.max(start, lunchStart);
-    const overlapEnd = Math.min(end, lunchEnd);
+    const overlapStart = Math.max(
+        start,
+        lunchStart
+    );
 
-    return Math.max(0, overlapEnd - overlapStart);
+    const overlapEnd = Math.min(
+        end,
+        lunchEnd
+    );
+
+    return Math.max(
+        0,
+        overlapEnd - overlapStart
+    );
 }
 
+/* =========================================================
+   NIGHT CROSSING
+========================================================= */
+
+function crossesMidnight(
+    inTime,
+    outTime
+) {
+    if (!inTime || !outTime) {
+        return false;
+    }
+
+    return minutes(outTime) <= minutes(inTime);
+}
 
 /* =========================================================
    MAIN CALCULATION
 ========================================================= */
 
-function calculate(r) {
+function calculate(record) {
     const s = settings();
 
     let regular = 0;
@@ -276,11 +309,12 @@ function calculate(r) {
     let night = 0;
 
     /*
-     * Leave / Sick / Absent
+     * Leave / Sick / Absent:
+     * no working hours and no OT.
      */
     if (
         ["leave", "sick", "absent"].includes(
-            r.status
+            record.status
         )
     ) {
         return {
@@ -292,7 +326,7 @@ function calculate(r) {
         };
     }
 
-    if (!r.inTime || !r.outTime) {
+    if (!record.inTime || !record.outTime) {
         return {
             regular,
             ot,
@@ -303,121 +337,88 @@ function calculate(r) {
     }
 
     const totalMinutes = duration(
-        r.inTime,
-        r.outTime
+        record.inTime,
+        record.outTime
     );
 
-    const totalHours = totalMinutes / 60;
+    const totalHours =
+        totalMinutes / 60;
 
-    const inM = minutes(r.inTime);
-    const outM = minutes(r.outTime);
+    const inMinutes =
+        minutes(record.inTime);
+
+    const outMinutes =
+        minutes(record.outTime);
 
     /*
      * =====================================================
      * HOLIDAY DUTY
+     *
+     * Holiday Day/Night:
+     * all worked time = OT
+     *
+     * 13:00 - 14:00 lunch is deducted.
+     *
+     * Holiday has NO late.
      * =====================================================
-     *
-     * Holiday duty can be Day or Night.
-     *
-     * All worked time is OT.
-     *
-     * Holiday Day Duty:
-     * 13:00 - 14:00 lunch = 1 hour deduction.
-     *
-     * Holiday Night Duty:
-     * No lunch deduction.
-     *
-     * No late is counted on holidays.
      */
-
-    if (r.dutyType === "holiday") {
-        let holidayOtMinutes = totalMinutes;
-
-        /*
-         * Day holiday duty gets 13:00-14:00 lunch deduction.
-         */
-        if (
-            r.holidayShift === "day" ||
-            r.shift === "day"
-        ) {
-            const lunchMinutes = lunchOverlap(
-                r.inTime,
-                r.outTime
+    if (
+        record.dutyType === "holiday" ||
+        record.status === "holiday"
+    ) {
+        const lunchMinutes =
+            holidayLunchOverlap(
+                record.inTime,
+                record.outTime
             );
 
-            holidayOtMinutes =
-                Math.max(
-                    0,
-                    totalMinutes - lunchMinutes
-                );
-        }
+        ot = Math.max(
+            0,
+            totalMinutes - lunchMinutes
+        ) / 60;
+
+        regular = 0;
 
         /*
-         * If no holidayShift/shift is stored,
-         * determine by start time.
-         *
-         * Before 18:00 = Day
-         * 18:00 or later = Night
+         * Holiday duty crossing midnight
+         * receives Night Bill.
          */
         if (
-            r.holidayShift !== "day" &&
-            r.holidayShift !== "night" &&
-            r.shift !== "day" &&
-            r.shift !== "night"
+            crossesMidnight(
+                record.inTime,
+                record.outTime
+            )
         ) {
-            if (inM < 18 * 60) {
-                const lunchMinutes = lunchOverlap(
-                    r.inTime,
-                    r.outTime
-                );
-
-                holidayOtMinutes =
-                    Math.max(
-                        0,
-                        totalMinutes - lunchMinutes
-                    );
-            }
-        }
-
-        ot = holidayOtMinutes / 60;
-
-        /*
-         * Holiday has NO late.
-         */
-        late = 0;
-
-        /*
-         * If holiday duty crosses midnight,
-         * add Night Bill.
-         */
-        if (outM <= inM) {
             night = s.nightBill;
         }
 
+        /*
+         * IMPORTANT:
+         * No late on holidays.
+         */
+        late = 0;
+        early = false;
+
         return {
-            regular: 0,
+            regular,
             ot,
-            late: 0,
-            early: false,
+            late,
+            early,
             night
         };
     }
 
-
     /*
      * =====================================================
      * NIGHT DUTY
-     * =====================================================
      *
-     * Normal Night:
+     * Normal:
      * 20:00 -> 04:00 = 8 hours regular
-     * After 04:00 = OT
-     *
-     * Midnight crossing is automatically handled.
+     * 04:00 onward = OT
+     * =====================================================
      */
 
-    if (r.dutyType === "night") {
-
+    if (record.dutyType === "night") {
         regular = Math.min(
             s.regularHours,
             totalHours
@@ -429,119 +430,27 @@ function calculate(r) {
         );
 
         /*
-         * Night Bill:
-         * Any night duty crossing midnight
-         * receives ৳100.
+         * Night duty late:
+         * scheduled In Time = 20:00
          */
-        if (outM <= inM) {
-            night = s.nightBill;
-        }
+        const scheduledNightIn = 20 * 60;
 
-        return {
-            regular,
-            ot,
-            late: 0,
-            early: false,
-            night
-        };
-    }
-
-
-    /*
-     * =====================================================
-     * NORMAL DAY DUTY
-     * =====================================================
-     *
-     * Normal Day:
-     * 08:00 -> 17:00
-     *
-     * 17:00 onward = OT.
-     *
-     * Important:
-     * If outTime is 00:06, 01:00 etc.,
-     * it belongs to the following day.
-     */
-
-    if (r.dutyType === "day") {
-
-        /*
-         * Late:
-         * Day duty expected at 08:00.
-         *
-         * Holiday already returned above,
-         * therefore holiday has no late.
-         */
-        if (inM > 8 * 60) {
-            late = inM - 8 * 60;
+        if (inMinutes > scheduledNightIn) {
+            late =
+                inMinutes -
+                scheduledNightIn;
         }
 
         /*
-         * Convert out time to elapsed timeline.
+         * Night duty crossing midnight
+         * gets Night Bill.
          */
-        let start = inM;
-        let end = outM;
-
-        if (end <= start) {
-            end += 1440;
-        }
-
-        /*
-         * Normal Day OT starts at 17:00.
-         */
-        let regularEnd = 17 * 60;
-
-        /*
-         * If duty started after midnight,
-         * keep 17:00 on the correct timeline.
-         */
-        if (regularEnd < start) {
-            regularEnd += 1440;
-        }
-
-        /*
-         * Regular time is up to 17:00.
-         */
-        const regularMinutes =
-            Math.max(
-                0,
-                Math.min(
-                    end,
-                    regularEnd
-                ) - start
-            );
-
-        regular =
-            Math.min(
-                s.regularHours,
-                regularMinutes / 60
-            );
-
-        /*
-         * Everything after 17:00 is OT.
-         */
-        const otMinutes =
-            Math.max(
-                0,
-                end - regularEnd
-            );
-
-        ot = otMinutes / 60;
-
-        /*
-         * If the person leaves before normal
-         * duty completion, mark early.
-         *
-         * This is used for attendance bonus logic.
-         */
-        if (end < regularEnd) {
-            early = true;
-        }
-
-        /*
-         * Day duty crossing midnight also gets
-         * Night Bill.
-         */
-        if (outM <= inM) {
+        if (
+            crossesMidnight(
+                record.inTime,
+                record.outTime
+            )
+        ) {
             night = s.nightBill;
         }
 
@@ -554,10 +463,115 @@ function calculate(r) {
         };
     }
 
+    /*
+     * =====================================================
+     * DAY DUTY
+     *
+     * 08:00 -> 17:00
+     * 17:00 onward = OT
+     *
+     * IMPORTANT:
+     * If Out Time is 00:06, 01:00, 01:30 etc.,
+     * it is treated as the NEXT DAY.
+     * =====================================================
+     */
+
+    const dayStart = 8 * 60;
+    const dayEnd = 17 * 60;
 
     /*
-     * Fallback
+     * Late is calculated from 08:00.
      */
+    if (inMinutes > dayStart) {
+        late =
+            inMinutes -
+            dayStart;
+    }
+
+    /*
+     * Convert Out Time into elapsed timeline.
+     *
+     * Example:
+     * In 08:00
+     * Out 00:06
+     *
+     * Out becomes 1446 minutes.
+     */
+    let elapsedOut =
+        minutes(record.outTime);
+
+    if (elapsedOut <= inMinutes) {
+        elapsedOut += 1440;
+    }
+
+    /*
+     * 17:00 cutoff on the same shift timeline.
+     */
+    let cutoff = dayEnd;
+
+    if (cutoff <= inMinutes) {
+        cutoff += 1440;
+    }
+
+    /*
+     * OT starts exactly after 17:00.
+     */
+    if (elapsedOut > cutoff) {
+        ot =
+            (elapsedOut - cutoff) /
+            60;
+    } else {
+        ot = 0;
+    }
+
+    /*
+     * Regular working time is maximum 8 hours.
+     *
+     * 08:00 -> 17:00 contains 9 elapsed hours,
+     * including the 1 hour lunch.
+     */
+    const regularElapsedMinutes =
+        Math.min(
+            Math.max(
+                0,
+                cutoff - inMinutes
+            ),
+            9 * 60
+        );
+
+    /*
+     * Convert 9 elapsed hours into
+     * 8 actual regular working hours.
+     */
+    regular =
+        Math.min(
+            s.regularHours,
+            Math.max(
+                0,
+                regularElapsedMinutes / 60 - 1
+            )
+        );
+
+    /*
+     * If the employee leaves before 17:00,
+     * this is considered early departure.
+     */
+    if (elapsedOut < cutoff) {
+        early = true;
+    }
+
+    /*
+     * Day duty crossing midnight:
+     * Night Bill = ৳100.
+     */
+    if (
+        crossesMidnight(
+            record.inTime,
+            record.outTime
+        )
+    ) {
+        night = s.nightBill;
+    }
 
     return {
         regular,
@@ -568,7 +582,6 @@ function calculate(r) {
     };
 }
 
-
 /* =========================================================
    MONTHLY STATISTICS
 ========================================================= */
@@ -576,13 +589,17 @@ function calculate(r) {
 function monthStats() {
     const s = settings();
 
-    const ym = todayLocal().slice(0, 7);
+    const currentMonth =
+        todayLocal().slice(0, 7);
 
-    const rs = workerRecords().filter(
-        (r) =>
-            r.date &&
-            r.date.startsWith(ym)
-    );
+    const records =
+        workerRecords().filter(
+            (record) =>
+                record.date &&
+                record.date.startsWith(
+                    currentMonth
+                )
+        );
 
     let present = 0;
     let absent = 0;
@@ -596,75 +613,75 @@ function monthStats() {
 
     let early = false;
 
-    rs.forEach((r) => {
+    records.forEach((record) => {
+        const calculation =
+            calculate(record);
 
-        const c = calculate(r);
-
-        if (r.status === "present") {
+        if (record.status === "present") {
             present++;
-        } else if (r.status === "absent") {
+        }
+
+        if (record.status === "absent") {
             absent++;
-        } else if (
+        }
+
+        if (
             ["leave", "sick"].includes(
-                r.status
+                record.status
             )
         ) {
             leave++;
-        } else if (
-            r.status === "holiday"
+        }
+
+        if (
+            record.status === "holiday" ||
+            record.dutyType === "holiday"
         ) {
             holiday++;
         }
 
-        regular += c.regular;
-        ot += c.ot;
+        regular += calculation.regular;
+        ot += calculation.ot;
+        late += calculation.late;
+        night += calculation.night;
 
-        /*
-         * Holiday late is already 0
-         * from calculate().
-         */
-        late += c.late;
-
-        night += c.night;
-
-        if (c.early) {
+        if (calculation.early) {
             early = true;
         }
     });
 
-
     /*
-     * Hourly wage calculation.
+     * Existing salary calculation retained.
      */
     const hourly =
-        s.salary /
-        (s.salaryDays * s.regularHours);
+        s.salary > 0 &&
+        s.salaryDays > 0 &&
+        s.regularHours > 0
+            ? (s.salary * 0.5605) /
+              (s.salaryDays * s.regularHours)
+            : 0;
 
-    /*
-     * OT rate = hourly × 2
-     */
     const otRate =
         hourly * s.otMultiplier;
 
     const otPay =
         ot * otRate;
 
-
     /*
-     * Attendance Bonus
+     * Attendance bonus:
      *
-     * Total monthly late:
+     * Holiday late = never counted.
      *
-     * <= 15 minutes = ৳625 bonus
-     * > 15 minutes = bonus lost
+     * Total late > 15 minutes
+     * => bonus lost.
      *
-     * Holiday has no late.
+     * Total late <= 15 minutes
+     * => bonus retained.
      */
     const bonus =
         late > s.lateLimit || early
             ? 0
             : s.attendanceBonus;
-
 
     const total =
         s.salary +
@@ -672,26 +689,30 @@ function monthStats() {
         bonus +
         night;
 
-
     return {
-        rs,
+        records,
+        rs: records,
+
         present,
         absent,
         leave,
         holiday,
+
         regular,
         ot,
         late,
         night,
+
         hourly,
         otRate,
         otPay,
+
         bonus,
         total,
+
         early
     };
 }
-
 
 /* =========================================================
    DASHBOARD
@@ -700,13 +721,15 @@ function monthStats() {
 function stat(
     title,
     value,
-    cls = "",
+    className = "",
     primary = false
 ) {
     return `
-        <div class="stat ${primary ? "primary" : ""}">
+        <div class="stat ${
+            primary ? "primary" : ""
+        }">
             <small>${title}</small>
-            <strong class="${cls}">
+            <strong class="${className}">
                 ${value}
             </strong>
         </div>
@@ -714,14 +737,13 @@ function stat(
 }
 
 function renderDashboard() {
-
     const m = monthStats();
     const s = settings();
-    const w = activeWorker();
+    const worker = activeWorker();
 
     if ($("activeWorkerName")) {
         $("activeWorkerName").textContent =
-            w.name;
+            worker.name;
     }
 
     if ($("activeWorkerMeta")) {
@@ -734,7 +756,6 @@ function renderDashboard() {
     }
 
     $("dashboard").innerHTML = [
-
         stat(
             "এই মাসের মোট বেতন",
             money(m.total),
@@ -787,94 +808,101 @@ function renderDashboard() {
                 ? "ok"
                 : "bad"
         )
-
     ].join("");
 }
-
 
 /* =========================================================
    TODAY
 ========================================================= */
 
 function renderToday() {
-
     if (!$("todayCard")) {
         return;
     }
 
-    const r =
+    const record =
         workerRecords().find(
-            (x) =>
-                x.date === todayLocal()
+            (item) =>
+                item.date === todayLocal()
         );
 
-    if (!r) {
-
+    if (!record) {
         $("todayCard").innerHTML =
-            `
-            <div class="empty">
-                আজকের কোনো ডিউটি সেভ করা হয়নি।
-            </div>
-            `;
+            '<div class="empty">আজকের কোনো ডিউটি সেভ করা হয়নি।</div>';
 
         return;
     }
 
-    const c = calculate(r);
+    const calculation =
+        calculate(record);
 
-    const dutyName =
-        r.dutyType === "night"
-            ? "Night Duty"
-            : r.dutyType === "holiday"
-                ? "Holiday Duty"
-                : "Day Duty";
+    let dutyLabel = "Day Duty";
 
-    $("todayCard").innerHTML =
-        `
+    if (record.dutyType === "night") {
+        dutyLabel = "Night Duty";
+    }
+
+    if (
+        record.dutyType === "holiday" ||
+        record.status === "holiday"
+    ) {
+        dutyLabel = "Holiday Duty";
+    }
+
+    $("todayCard").innerHTML = `
         <div class="today-row">
 
             <div>
                 <strong>
-                    ${dutyName}
+                    ${dutyLabel}
                 </strong>
 
                 <br>
 
-                <span class="badge ${r.status}">
-                    ${r.status}
+                <span class="badge ${record.status}">
+                    ${record.status}
                 </span>
             </div>
 
             <div>
                 <b>
-                    OT ${fmtHours(c.ot)} h
+                    OT ${fmtHours(
+                        calculation.ot
+                    )} h
                 </b>
 
                 <br>
 
                 <small>
-                    ${r.inTime || "-"}
+                    ${record.inTime || "-"}
                     →
-                    ${r.outTime || "-"}
+                    ${record.outTime || "-"}
+                </small>
+
+                <br>
+
+                <small>
+                    Night Bill:
+                    ${money(
+                        calculation.night
+                    )}
                 </small>
             </div>
 
         </div>
-        `;
+    `;
 }
-
 
 /* =========================================================
    RECENT RECORDS
 ========================================================= */
 
 function renderRecent() {
-
     if (!$("recentRecords")) {
         return;
     }
 
-    const rs =
+    const records =
         workerRecords()
             .slice()
             .sort(
@@ -885,31 +913,36 @@ function renderRecent() {
             )
             .slice(0, 5);
 
-    if (!rs.length) {
-
+    if (!records.length) {
         $("recentRecords").innerHTML =
-            `
-            <div class="empty">
-                এখনও কোনো রেকর্ড নেই।
-            </div>
-            `;
+            '<div class="empty">এখনও কোনো রেকর্ড নেই।</div>';
 
         return;
     }
 
     $("recentRecords").innerHTML =
-        rs
-            .map((r) => {
-
+        records
+            .map((record) => {
                 const c =
-                    calculate(r);
+                    calculate(record);
 
-                const dutyName =
-                    r.dutyType === "night"
-                        ? "Night"
-                        : r.dutyType === "holiday"
-                            ? "Holiday"
-                            : "Day";
+                let duty = "Day";
+
+                if (
+                    record.dutyType ===
+                    "night"
+                ) {
+                    duty = "Night";
+                }
+
+                if (
+                    record.dutyType ===
+                        "holiday" ||
+                    record.status ===
+                        "holiday"
+                ) {
+                    duty = "Holiday";
+                }
 
                 return `
                     <div
@@ -921,20 +954,22 @@ function renderRecent() {
                     >
 
                         <div>
-                            <b>${r.date}</b>
+                            <b>${record.date}</b>
 
                             <br>
 
                             <small>
-                                ${dutyName}
+                                ${duty}
                                 •
-                                ${r.status}
+                                ${record.status}
                             </small>
                         </div>
 
                         <div>
                             <b>
-                                OT ${fmtHours(c.ot)}h
+                                OT ${fmtHours(
+                                    c.ot
+                                )}h
                             </b>
 
                             <br>
@@ -950,57 +985,16 @@ function renderRecent() {
             .join("");
 }
 
-
 /* =========================================================
-   RECORDS TABLE
+   ALL RECORDS
 ========================================================= */
 
 function renderRecords() {
-
-    if (!$("records")) {
+    if (
+        !$("records") ||
+        !$("recordSearch")
+    ) {
         return;
     }
 
-    const q =
-        ($("recordSearch")?.value || "")
-            .toLowerCase();
-
-    let rs =
-        workerRecords()
-            .slice()
-            .sort(
-                (a, b) =>
-                    b.date.localeCompare(
-                        a.date
-                    )
-            );
-
-    if (q) {
-
-        rs = rs.filter((r) => {
-
-            const text =
-                `${r.date} ${r.status} ${r.dutyType} ${r.notes || ""}`
-                    .toLowerCase();
-
-            return text.includes(q);
-        });
-    }
-
-    if ($("recordCount")) {
-        $("recordCount").textContent =
-            `${rs.length}টি রেকর্ড`;
-    }
-
-    if (!rs.length) {
-
-        $("records").innerHTML =
-            `
-            <tr>
-                <td
-                    colspan="10"
-                    class="empty"
-                >
-                    কোনো রেকর্ড পাওয়া যায়নি।
-                </td>
-        
+    
